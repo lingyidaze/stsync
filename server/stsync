@@ -1,0 +1,345 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+set -eu
+
+usage() {
+    cat <<'EOF'
+STSync 服务端管理面板（root 执行）
+  stsync                  打开交互式面板
+  stsync status           服务状态
+  stsync key              显示服务器地址 + API Key
+  stsync rotate           更换 API Key（旧 Key 立即失效）
+  stsync devices          已接入设备列表
+  stsync revoke <设备>    断开设备（设备 ID 或名称）
+  stsync lock             关闭新设备接入
+  stsync unlock [分钟]    开启新设备接入；给出分钟数则到时自动关闭
+  stsync port <端口>      修改对外端口
+  stsync host <IP/域名>   修改对外地址
+  stsync firewall         重新应用防火墙放行与连接限速规则
+  stsync restart          重启服务
+  stsync logs [行数]      查看日志
+  stsync uninstall        卸载 STSync（删除服务、程序和全部云端数据）
+EOF
+}
+
+BASE=/srv/stsync
+CONFIG=$BASE/config.json
+KEYFILE=$BASE/apikey
+LOCKFILE=$BASE/pairing.locked
+AUTOLOCK_UNIT=stsync-autolock
+SERVICE=stsync.service
+TT_SERVICE=stsync-tauritavern.service
+ENGINE="/opt/stsync/node/bin/node /opt/stsync/engine/bin/stsync-engine.mjs --base $BASE"
+RATE_LIMIT=30/minute
+RATE_BURST=60
+
+[ "$(id -u)" = 0 ] || { echo "需要 root 权限" >&2; exit 1; }
+if [ "${1:-}" = uninstall ]; then shift; exec sh /opt/stsync/uninstall.sh "$@"; fi
+[ -f "$CONFIG" ] || { echo "未找到 $CONFIG，请先运行 install.sh" >&2; exit 1; }
+
+engine() { (cd "$BASE" && runuser -u stsync -- $ENGINE "$@"); }
+
+server_url() { engine config get url; }
+listen_addr() { engine config get listen; }
+listen_port() { listen_addr | sed 's/.*://'; }
+public_host() { server_url | sed 's#^https://##; s#/.*$##; s#:[0-9]*$##'; }
+
+set_config() {
+    (cd "$BASE" && $ENGINE config set "$1" "$2" >/dev/null)
+    chown root:stsync "$CONFIG"
+    chmod 0640 "$CONFIG"
+}
+
+valid_port() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+port_in_use() {
+    ss -Htln "sport = :$1" | grep -q .
+}
+
+new_token() { head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n'; }
+
+is_locked() { [ -f "$LOCKFILE" ]; }
+
+ensure_key() {
+    if [ ! -s "$KEYFILE" ]; then
+        (umask 077; new_token > "$KEYFILE.tmp")
+        mv -f "$KEYFILE.tmp" "$KEYFILE"
+    fi
+    chown root:stsync "$KEYFILE"
+    chmod 0640 "$KEYFILE"
+}
+
+spki() { engine cert; }
+
+cmd_key() {
+    ensure_key
+    echo "服务器地址: $(server_url)"
+    echo "API Key:    sts1.$(cat "$KEYFILE").$(spki)"
+    if is_locked; then
+        echo "（新设备接入已关闭，要连接新设备请先 stsync unlock）"
+    fi
+}
+
+cmd_rotate() {
+    rm -f "$KEYFILE"
+    cmd_key
+    echo "旧 Key 已失效。已连接的设备不受影响，要断开请用「断开设备」。"
+}
+
+cancel_autolock() {
+    rm -f "$BASE/pairing.autolock"
+    [ -n "${STSYNC_AUTOLOCK:-}" ] && return 0
+    systemctl stop "$AUTOLOCK_UNIT.timer" "$AUTOLOCK_UNIT.service" >/dev/null 2>&1 || true
+    systemctl reset-failed "$AUTOLOCK_UNIT.timer" "$AUTOLOCK_UNIT.service" >/dev/null 2>&1 || true
+}
+
+cmd_lock() {
+    (umask 022; : > "$LOCKFILE")
+    cancel_autolock
+    echo "已关闭新设备接入。已连接的设备照常同步。"
+}
+
+cmd_unlock() {
+    minutes=${1:-}
+    if [ -n "$minutes" ]; then
+        valid_port "$minutes" || { echo "分钟数无效：$minutes" >&2; return 1; }
+    fi
+    cancel_autolock
+    rm -f "$LOCKFILE"
+    ensure_key
+    if [ -n "$minutes" ]; then
+        systemd-run --quiet --unit="$AUTOLOCK_UNIT" --on-active="${minutes}m" \
+            --setenv=STSYNC_AUTOLOCK=1 \
+            --description="stsync: auto-lock pairing" /usr/local/sbin/stsync lock
+        date -d "+$minutes min" '+%m-%d %H:%M' > "$BASE/pairing.autolock"
+        echo "已开启新设备接入，$minutes 分钟后（$(cat "$BASE/pairing.autolock")）自动关闭。"
+    else
+        echo "已开启新设备接入（不会自动关闭；设备连好后建议 stsync lock）。"
+    fi
+}
+
+pairing_state() {
+    if is_locked; then
+        echo "已关闭"
+    elif systemctl is-active -q "$AUTOLOCK_UNIT.timer" 2>/dev/null; then
+        echo "开启（$(cat "$BASE/pairing.autolock" 2>/dev/null || echo 稍后) 自动关闭）"
+    else
+        echo "开启（建议设备连好后关闭）"
+    fi
+}
+
+ufw_active() { command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; }
+
+write_ratelimit() {
+    file=$1 chain=$2 name=$3 port=$4
+    [ -f "$file" ] || return 0
+    tmp="$file.stsync.tmp"
+    awk -v chain="$chain" -v name="$name" -v port="$port" -v rate="$RATE_LIMIT" -v burst="$RATE_BURST" '
+        /^# BEGIN stsync ratelimit/ { skip = 1; next }
+        /^# END stsync ratelimit/   { skip = 0; next }
+        skip { next }
+        !done && index($0, "-A " chain " ") == 1 {
+            print "# BEGIN stsync ratelimit"
+            printf "-A %s -p tcp --dport %s -m conntrack --ctstate NEW -m hashlimit --hashlimit-above %s --hashlimit-burst %s --hashlimit-mode srcip --hashlimit-name %s -j DROP\n", chain, port, rate, burst, name
+            print "# END stsync ratelimit"
+            done = 1
+        }
+        { print }
+    ' "$file" > "$tmp"
+    if cmp -s "$tmp" "$file"; then rm -f "$tmp"; return 0; fi
+    cat "$tmp" > "$file"
+    rm -f "$tmp"
+    RULES_CHANGED=1
+}
+
+apply_firewall() {
+    new=$1 old=${2:-}
+    ufw_active || { echo "未检测到启用中的 ufw，跳过防火墙配置。"; return 0; }
+    RULES_CHANGED=0
+    cp -p /etc/ufw/before.rules /etc/ufw/before.rules.stsync.bak
+    [ -f /etc/ufw/before6.rules ] && cp -p /etc/ufw/before6.rules /etc/ufw/before6.rules.stsync.bak
+    write_ratelimit /etc/ufw/before.rules ufw-before-input stsync4 "$new"
+    write_ratelimit /etc/ufw/before6.rules ufw6-before-input stsync6 "$new"
+    if ! ufw status | grep -q "^$new/tcp .*ALLOW"; then
+        ufw allow "$new/tcp" comment 'STSync' >/dev/null
+        RULES_CHANGED=1
+    fi
+    if [ -n "$old" ] && [ "$old" != "$new" ]; then
+        ufw delete allow "$old/tcp" >/dev/null 2>&1 || true
+        RULES_CHANGED=1
+    fi
+    if [ "$RULES_CHANGED" = 0 ]; then
+        echo "防火墙：$new/tcp 放行与限速规则已就绪，跳过"
+        return 0
+    fi
+    if ! ufw reload >/dev/null; then
+        echo "防火墙规则应用失败，已回滚" >&2
+        cp -p /etc/ufw/before.rules.stsync.bak /etc/ufw/before.rules
+        [ -f /etc/ufw/before6.rules.stsync.bak ] && cp -p /etc/ufw/before6.rules.stsync.bak /etc/ufw/before6.rules
+        ufw reload >/dev/null || true
+        return 1
+    fi
+    echo "防火墙：已放行 $new/tcp，每 IP 新建连接限速 $RATE_LIMIT（突发 $RATE_BURST）${old:+，已移除 $old/tcp}"
+}
+
+cmd_status() {
+    state=$(systemctl is-active "$SERVICE" 2>/dev/null || true)
+    tt_state=$(systemctl is-active "$TT_SERVICE" 2>/dev/null || true)
+    devices=$(engine devices --json 2>/dev/null | grep -c '"kind"' || true)
+    size=$(du -sh "$BASE/workspace" 2>/dev/null | cut -f1)
+    echo "服务状态:   $state（TauriTavern 兼容：$tt_state）"
+    echo "服务器地址: $(server_url)"
+    echo "监听:       $(listen_addr)"
+    echo "已接入设备: ${devices:-0} 台"
+    echo "新设备接入: $(pairing_state)"
+    echo "云端数据:   ${size:-0}（$BASE/workspace）"
+    echo "同步引擎:   STSync $(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' /opt/stsync/engine/package.json)（Node $(/opt/stsync/node/bin/node --version)）"
+}
+
+cmd_devices() {
+    engine devices
+}
+
+cmd_revoke() {
+    [ -n "${1:-}" ] || { echo "用法: stsync revoke <设备ID或名称>" >&2; return 1; }
+    engine revoke "$1"
+}
+
+restart_service() {
+    systemctl restart "$TT_SERVICE" 2>/dev/null || true
+    systemctl restart "$SERVICE"
+    sleep 1
+    if systemctl is-active -q "$SERVICE"; then
+        echo "服务已重启。"
+    else
+        echo "服务启动失败，最近日志：" >&2
+        journalctl -u "$SERVICE" --no-pager -n 15 >&2
+        return 1
+    fi
+}
+
+cmd_port() {
+    new=${1:-}
+    old=$(listen_port)
+    valid_port "$new" || { echo "端口无效：$new（应为 1-65535）" >&2; return 1; }
+    if [ "$new" = "$old" ]; then echo "端口已经是 $new"; return 0; fi
+    if port_in_use "$new"; then echo "端口 $new 已被占用：" >&2; ss -Htlnp "sport = :$new" >&2; return 1; fi
+
+    host=$(public_host)
+    ip=$(listen_addr | sed 's/:[0-9]*$//')
+    set_config listen "$ip:$new"
+    set_config url "https://$host:$new"
+
+    apply_firewall "$new" "$old"
+    restart_service
+    echo
+    cmd_key
+    echo
+    echo "注意：已连接的设备需要在插件里点「修改」，把地址改成上面的新地址并重新保存（API Key 不变）。"
+}
+
+cmd_host() {
+    new=${1:-}
+    case "$new" in
+        ''|*[!A-Za-z0-9.:-]*) echo "地址无效：$new（填 IP 或域名，不带 https:// 和端口）" >&2; return 1 ;;
+    esac
+    set_config url "https://$new:$(listen_port)"
+    restart_service
+    echo
+    cmd_key
+    echo
+    echo "注意：已连接的设备需要在插件里点「修改」，换成上面的新地址并重新保存（API Key 不变）。"
+}
+
+cmd_logs() {
+    journalctl -u "$SERVICE" -u "$TT_SERVICE" --no-pager -n "${1:-50}"
+}
+
+ask() {
+    printf '%s' "$1"
+    IFS= read -r REPLY || { echo; exit 0; }
+}
+
+pause() { ask "按回车返回菜单…"; }
+
+panel() {
+    while :; do
+        clear 2>/dev/null || true
+        echo "========== STSync · 服务端面板 =========="
+        cmd_status 2>/dev/null | sed 's/^/  /'
+        echo "---------------------------------------------"
+        echo "  1) 显示 地址 + API Key"
+        echo "  2) 更换 API Key"
+        echo "  3) 已连接设备"
+        echo "  4) 断开设备"
+        echo "  5) 开启 / 关闭新设备接入"
+        echo "  6) 修改端口"
+        echo "  7) 修改对外地址（IP/域名）"
+        echo "  8) 重启服务"
+        echo "  9) 查看日志"
+        echo "  u) 卸载 STSync"
+        echo "  0) 退出"
+        echo "============================================="
+        ask "请选择: "
+        echo
+        case "$REPLY" in
+            1) cmd_key || true; pause ;;
+            2)
+                ask "确定更换 API Key？旧 Key 将立即失效 [y/N]: "
+                case "$REPLY" in y|Y) cmd_rotate || true ;; *) echo "已取消" ;; esac
+                pause ;;
+            3) cmd_devices || true; pause ;;
+            4)
+                cmd_devices || true
+                ask "输入要断开的设备 ID 或名称（留空取消）: "
+                [ -n "$REPLY" ] && { cmd_revoke "$REPLY" || true; }
+                pause ;;
+            5)
+                if is_locked; then
+                    ask "开启新设备接入多少分钟后自动关闭？（默认 30，填 0 表示不自动关闭）: "
+                    case "${REPLY:-30}" in
+                        0) cmd_unlock || true ;;
+                        *) cmd_unlock "${REPLY:-30}" || true ;;
+                    esac
+                else
+                    ask "当前新设备接入为开启状态，确定关闭？[Y/n]: "
+                    case "$REPLY" in n|N) echo "已取消" ;; *) cmd_lock || true ;; esac
+                fi
+                pause ;;
+            6)
+                ask "新端口（当前 $(listen_port)，留空取消）: "
+                [ -n "$REPLY" ] && { cmd_port "$REPLY" || true; }
+                pause ;;
+            7)
+                ask "新对外地址（当前 $(public_host)，留空取消）: "
+                [ -n "$REPLY" ] && { cmd_host "$REPLY" || true; }
+                pause ;;
+            8) restart_service || true; pause ;;
+            9) cmd_logs 50 || true; pause ;;
+            u|U) exec sh /opt/stsync/uninstall.sh ;;
+            0|q|Q) exit 0 ;;
+            *) ;;
+        esac
+    done
+}
+
+case "${1:-panel}" in
+    panel)   panel ;;
+    status)  cmd_status ;;
+    key)     cmd_key ;;
+    rotate)  cmd_rotate ;;
+    devices) cmd_devices ;;
+    revoke)  cmd_revoke "${2:-}" ;;
+    lock)    cmd_lock ;;
+    unlock)  cmd_unlock "${2:-}" ;;
+    port)    cmd_port "${2:-}" ;;
+    host)    cmd_host "${2:-}" ;;
+    firewall) apply_firewall "$(listen_port)" ;;
+    restart) restart_service ;;
+    logs)    cmd_logs "${2:-50}" ;;
+    -h|--help|help) usage ;;
+    *) echo "未知命令：$1（stsync help 查看用法）" >&2; exit 2 ;;
+esac

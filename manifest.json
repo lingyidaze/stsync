@@ -1,0 +1,12 @@
+{
+  "display_name": "STSync",
+  "loading_order": 100,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "STSync",
+  "version": "1.0.0",
+  "homePage": "https://github.com/lingyidaze/stsync",
+  "description": "SillyTavern 云端同步：填写服务器地址 + API Key，即可把全部数据上传/下载到你的服务器，支持增量/镜像；同时适配 TauriTavern，两边共用同一份数据。"
+}

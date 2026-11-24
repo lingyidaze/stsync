@@ -1,0 +1,10 @@
+{
+  "name": "stsync-engine",
+  "version": "1.0.0",
+  "description": "STSync 同步引擎：TT-Sync v2 协议兼容的服务端（Node.js，无第三方依赖）",
+  "type": "module",
+  "bin": { "stsync-engine": "bin/stsync-engine.mjs" },
+  "engines": { "node": ">=22.15.0" },
+  "license": "AGPL-3.0-only",
+  "private": true
+}
