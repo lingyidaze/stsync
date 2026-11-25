@@ -18,7 +18,7 @@ export const CATEGORIES = [
     { id: 'extensions', label: '扩展', dirs: [...user('extensions'), 'public/scripts/extensions/third-party'] },
     { id: 'luker', label: 'Luker 专属', dirs: user('card-apps', 'skills') },
     { id: 'vectors', label: '向量库', dirs: user('vectors') },
-    { id: 'backups', label: '备份', dirs: user('backups') },
+    { id: 'backups', label: '备份', dirs: user('backups'), optional: true },
     {
         id: 'settings', label: '设置', files: user('settings.json', 'image-metadata.json'),
         mergeInputs: user('settings/appearance.json', 'settings/layout.json', 'settings/presets.json', 'settings/persona-state.json'),
@@ -27,6 +27,7 @@ export const CATEGORIES = [
 ];
 
 export const CATEGORY_IDS = CATEGORIES.map((c) => c.id);
+export const DEFAULT_CATEGORY_IDS = CATEGORIES.filter((c) => !c.optional).map((c) => c.id);
 const BY_ID = new Map(CATEGORIES.map((c) => [c.id, c]));
 
 const TEMP_SUFFIXES = ['.stsync.tmp', '.ttsync.tmp'];

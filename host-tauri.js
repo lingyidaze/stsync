@@ -2,6 +2,7 @@
 import { normalizeServerUrl, parseApiKey } from './api.js';
 
 const API_KEY_EXPIRES_AT_MS = 4102444800000;
+const EXCLUDED_DATASETS = new Set(['backups']);
 const HOST_SYNC_LISTENERS = '/scripts/tauri/setting/setting-panel/sync-listeners.js';
 
 async function invoke(command, args = {}) {
@@ -134,7 +135,10 @@ export const host = {
     async sync(direction, id, mode, onProgress) {
         const catalog = await getCatalog();
         const options = {
-            selection: { policy_version: catalog.policyVersion, dataset_ids: catalog.supportedDatasetIds },
+            selection: {
+            policy_version: catalog.policyVersion,
+            dataset_ids: catalog.supportedDatasetIds.filter((id) => !EXCLUDED_DATASETS.has(id)),
+        },
             overwrite_policy: await getOverwritePolicy(),
             require_bundle_zstd: true,
         };

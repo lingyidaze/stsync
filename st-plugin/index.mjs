@@ -7,7 +7,7 @@ import { createTransport, pairDevice, serverInfo, SyncSession } from './lib/clie
 import { UserState } from './lib/state.mjs';
 import { runPush, runPull } from './lib/jobs.mjs';
 
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 const B64URL = /^[A-Za-z0-9_-]+$/;
 const MODES = new Set(['Incremental', 'Mirror']);
 

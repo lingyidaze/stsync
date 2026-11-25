@@ -7,7 +7,7 @@ import zlib from 'node:zlib';
 import { Readable } from 'node:stream';
 
 import { errorFromResponse } from './client.mjs';
-import { CATEGORY_IDS, resolveScope } from './categories.mjs';
+import { DEFAULT_CATEGORY_IDS, resolveScope } from './categories.mjs';
 import { MAX_SIZE, chunkId } from './chunker.mjs';
 import {
     LocalIndex, scanLocal, resolveLocal, readLocalChunk, publishFile, removeFileAndPrune, readLocalSettings, digestOf,
@@ -87,7 +87,7 @@ class LocalTrash {
 function categoriesFor(info, categories) {
     if (categories) return categories;
     const offered = Array.isArray(info?.categories) ? new Set(info.categories.map((c) => c?.id)) : null;
-    return offered ? CATEGORY_IDS.filter((id) => offered.has(id)) : CATEGORY_IDS;
+    return offered ? DEFAULT_CATEGORY_IDS.filter((id) => offered.has(id)) : DEFAULT_CATEGORY_IDS;
 }
 
 function skippedOf(plan) {
