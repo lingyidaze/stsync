@@ -22,6 +22,8 @@ export const SETUP_COMMANDS = [
     { label: '电脑（在 SillyTavern 文件夹里运行）', command: 'node data/default-user/extensions/stsync/st-plugin/install.mjs' },
 ];
 
+const KNOWN_HOSTS = { sillytavern: 'SillyTavern', luker: 'Luker' };
+
 const extensionVersion = fetch(new URL('./manifest.json', import.meta.url))
     .then((r) => r.json())
     .then((m) => String(m.version || ''))
@@ -98,7 +100,18 @@ export const host = {
                 commands: SETUP_COMMANDS,
             };
         }
-        return { state: 'ok', title: '服务端插件正常', detail: `SillyTavern 服务端插件 v${plugin}` };
+        const hostName = String(status.host?.name || '');
+        const hostVersion = status.host?.version ? ` ${status.host.version}` : '';
+        const known = KNOWN_HOSTS[hostName.toLowerCase()];
+        if (!known) {
+            return {
+                state: 'unknown',
+                title: `未识别的酒馆：${hostName || '未知'}${hostVersion}`,
+                detail: 'STSync 只在 SillyTavern、Luker 和 TauriTavern 上验证过。这个酒馆的数据结构可能不同，'
+                    + '同步前请先备份数据，并先用「增量」模式小范围试用，确认无误后再正常使用；尽量不要使用「镜像」模式。',
+            };
+        }
+        return { state: 'ok', title: '服务端插件正常', detail: `${known}${hostVersion} · 服务端插件 v${plugin}` };
     },
 
     async listServers() {
@@ -115,8 +128,8 @@ export const host = {
         await call('POST', '/unpair', { id });
     },
 
-    async sync(direction, id, mode, onProgress) {
-        const started = await call('POST', '/sync', { direction, id, mode });
+    async sync(direction, id, mode, onProgress, { force = false } = {}) {
+        const started = await call('POST', '/sync', { direction, id, mode, force });
         const jobId = started.job?.id;
         for (;;) {
             await sleep(POLL_MS);
@@ -130,7 +143,10 @@ export const host = {
     },
 
     async afterSync(direction, result) {
-        if (direction === 'pull' && result?.status === 'completed') {
+        const s = result?.summary || {};
+        const changed = s.files > 0 || s.deleted > 0;
+        const skipped = Array.isArray(s.skipped) && s.skipped.length > 0;
+        if (direction === 'pull' && result?.status === 'completed' && changed && !skipped) {
             window.toastr?.info?.('下载完成，即将刷新页面以载入新数据', 'STSync');
             setTimeout(() => window.location.reload(), 1500);
         }

@@ -12,6 +12,7 @@ OPT=/opt/stsync
 PORT=8443
 HOST=
 TAURITAVERN=1
+WORKSPACE=
 
 usage() {
     cat <<'EOF'
@@ -19,6 +20,7 @@ usage() {
   curl -fsSL https://raw.githubusercontent.com/lingyidaze/stsync/main/install.sh | sudo sh -s -- [参数]
   sh install.sh [参数]（在仓库目录中）
 参数：--port 端口（默认 8443）  --host IP或域名  --no-tauritavern
+      --workspace 目录   直接使用服务器上某个 SillyTavern / Luker 的数据（例如 /luker）
 重复运行会自动跳过已完成的步骤，可直接用来升级。卸载：sh /opt/stsync/uninstall.sh
 EOF
 }
@@ -28,6 +30,7 @@ while [ $# -gt 0 ]; do
         --port) PORT=$2; shift 2 ;;
         --host) HOST=$2; shift 2 ;;
         --no-tauritavern) TAURITAVERN=0; shift ;;
+        --workspace) WORKSPACE=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "未知参数：$1" >&2; exit 2 ;;
     esac
@@ -53,6 +56,23 @@ case "$(uname -m)" in
     aarch64) ARCH=arm64 ;;
     *) fail "不支持的 CPU 架构：$(uname -m)" ;;
 esac
+
+if [ -n "$WORKSPACE" ]; then
+    WORKSPACE=$(cd "$WORKSPACE" 2>/dev/null && pwd) || fail "目录不存在：$WORKSPACE"
+    [ -f "$WORKSPACE/server.js" ] && [ -d "$WORKSPACE/data" ] || fail "$WORKSPACE 不是 SillyTavern / Luker 的根目录（应包含 server.js 和 data/）"
+fi
+config_value() { sed -n "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/p" "$BASE/config.json" 2>/dev/null | head -n1; }
+[ -n "$WORKSPACE" ] || WORKSPACE=$(config_value workspace)
+[ -n "$WORKSPACE" ] || WORKSPACE=$BASE/workspace
+if [ "$WORKSPACE" = "$BASE/workspace" ]; then
+    EXTERNAL=0
+    RUN_AS=stsync:stsync
+else
+    EXTERNAL=1
+    RUN_AS=$(stat -c %U:%G "$WORKSPACE/data")
+fi
+RUN_USER=${RUN_AS%%:*}
+RUN_GROUP=${RUN_AS#*:}
 
 step "[1/6] 安装基础工具"
 MISSING=
@@ -126,16 +146,34 @@ chown -R -h root:root "$OPT" && chmod -R go-w "$OPT"
 
 id stsync >/dev/null 2>&1 || useradd -r -M -d "$BASE" -s /usr/sbin/nologin stsync
 install -d -m 0755 "$BASE"
-install -d -o stsync -g stsync -m 0700 "$BASE/state" "$BASE/workspace"
+install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0700 "$BASE/state"
+[ "$EXTERNAL" = 1 ] || install -d -o stsync -g stsync -m 0700 "$BASE/workspace"
+[ "$EXTERNAL" = 0 ] || [ -d "$WORKSPACE/public/scripts/extensions/third-party" ] \
+    || install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0755 "$WORKSPACE/public/scripts/extensions/third-party"
 cd "$BASE"
 if [ ! -f "$BASE/config.json" ]; then
     CHANGED=1
     "$OPT/node/bin/node" "$OPT/engine/bin/stsync-engine.mjs" --base "$BASE" \
-        init --workspace "$BASE/workspace" --url "https://$HOST:$PORT" --listen "0.0.0.0:$PORT" >/dev/null
+        init --workspace "$WORKSPACE" --url "https://$HOST:$PORT" --listen "0.0.0.0:$PORT" >/dev/null
     FRESH=1
 else
     FRESH=0
 fi
+rc=0
+"$OPT/node/bin/node" -e '
+    const fs = require("fs"); const [f, ws, runAs, external] = process.argv.slice(1);
+    const text = fs.readFileSync(f, "utf8"); const c = JSON.parse(text);
+    const moved = c.workspace !== ws;
+    c.workspace = ws; c.runAs = runAs; c.trash = external === "1";
+    const next = JSON.stringify(c, null, 2);
+    if (next !== text) fs.writeFileSync(f, next);
+    process.exitCode = moved ? 4 : next !== text ? 3 : 0;' "$BASE/config.json" "$WORKSPACE" "$RUN_AS" "$EXTERNAL" || rc=$?
+if [ "$rc" = 4 ]; then
+    rm -f "$BASE/state/index.json"
+    echo "  云端数据目录改为：$WORKSPACE"
+fi
+[ "$rc" = 0 ] || CHANGED=1
+[ "$EXTERNAL" = 0 ] || echo "  云端数据与 $WORKSPACE 共用，服务以 $RUN_AS 身份运行"
 
 step "[5/6] 安装 TauriTavern 兼容组件"
 if [ "$TAURITAVERN" = 1 ]; then
@@ -150,15 +188,20 @@ if [ "$TAURITAVERN" = 1 ]; then
         install -d -m 0755 "$OPT/tt-sync"
         install -m 0755 "$TMP/$B" "$OPT/tt-sync/tt-sync"
     fi
-    install -d -o stsync -g stsync -m 0700 "$BASE/tauritavern"
+    install -d -o "$RUN_USER" -g "$RUN_GROUP" -m 0700 "$BASE/tauritavern"
     if [ -f "$BASE/tauritavern/config.toml" ]; then
         skip "tt-sync 已初始化"
     else
         CHANGED=1
-        runuser -u stsync -- "$OPT/tt-sync/tt-sync" --quiet --state-dir "$BASE/tauritavern" \
+        chown -R "$RUN_AS" "$BASE/tauritavern"
+        runuser -u "$RUN_USER" -- "$OPT/tt-sync/tt-sync" --quiet --state-dir "$BASE/tauritavern" \
             --config-file "$BASE/tauritavern/config.toml" \
-            init --path "$BASE/workspace" --layout silly-tavern \
+            init --path "$WORKSPACE" --layout silly-tavern \
             --public-url "https://$HOST:$PORT" --listen "$TTSYNC_LISTEN" >/dev/null
+    fi
+    if ! grep -qx "workspace_path = \"$WORKSPACE\"" "$BASE/tauritavern/config.toml"; then
+        sed -i "s#^workspace_path = .*#workspace_path = \"$WORKSPACE\"#" "$BASE/tauritavern/config.toml"
+        CHANGED=1
     fi
     "$OPT/node/bin/node" -e '
         const fs = require("fs"); const f = process.argv[1];
@@ -170,19 +213,29 @@ if [ "$TAURITAVERN" = 1 ]; then
 else
     echo "  已跳过（--no-tauritavern）"
 fi
-chown -R stsync:stsync "$BASE/state" "$BASE/workspace"
-chown root:stsync "$BASE/config.json"
+chown -R "$RUN_AS" "$BASE/state"
+[ ! -d "$BASE/tauritavern" ] || chown -R "$RUN_AS" "$BASE/tauritavern"
+[ "$EXTERNAL" = 1 ] || chown -R stsync:stsync "$BASE/workspace"
+chown "root:$RUN_GROUP" "$BASE/config.json"
+[ ! -f "$BASE/apikey" ] || chown "root:$RUN_GROUP" "$BASE/apikey"
 chmod 0640 "$BASE/config.json"
 
 step "[6/6] 启动服务"
+if [ "$EXTERNAL" = 1 ]; then
+    UMASK=0022
+    WS_RW="$WORKSPACE/data $WORKSPACE/public/scripts/extensions/third-party"
+else
+    UMASK=0077
+    WS_RW=$BASE/workspace
+fi
 sandbox() {
     cat <<EOF
-User=stsync
-Group=stsync
+User=$RUN_USER
+Group=$RUN_GROUP
 WorkingDirectory=$BASE
 Restart=on-failure
 RestartSec=5
-UMask=0077
+UMask=$UMASK
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -224,7 +277,7 @@ Wants=network-online.target
 [Service]
 Environment=NODE_ENV=production
 ExecStart=$OPT/node/bin/node $OPT/engine/bin/stsync-engine.mjs --base $BASE serve
-ReadWritePaths=$BASE/state $BASE/workspace$( [ "$TAURITAVERN" = 1 ] && echo " $BASE/tauritavern" )
+ReadWritePaths=$BASE/state $WS_RW$( [ "$TAURITAVERN" = 1 ] && echo " $BASE/tauritavern" )
 MemoryMax=2G
 TasksMax=256
 CPUQuota=200%
@@ -243,7 +296,7 @@ Before=stsync.service
 
 [Service]
 ExecStart=$OPT/tt-sync/tt-sync --state-dir $BASE/tauritavern --config-file $BASE/tauritavern/config.toml serve
-ReadWritePaths=$BASE/tauritavern $BASE/workspace
+ReadWritePaths=$BASE/tauritavern $WS_RW
 MemoryDenyWriteExecute=yes
 MemoryMax=1G
 TasksMax=128

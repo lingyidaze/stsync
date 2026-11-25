@@ -144,6 +144,7 @@
     animation: stsync-pulse 1s ease-in-out infinite alternate;
 }
 
+.stsync .stsync-dot-unknown,
 .stsync .stsync-dot-outdated {
     background: var(--stsync-accent);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--stsync-accent) 25%, transparent);
@@ -313,6 +314,36 @@
 
 .stsync .stsync-result-ok .stsync-result-title i {
     color: var(--stsync-ok);
+}
+
+.stsync .stsync-result-warn {
+    border-left-color: var(--stsync-accent);
+}
+
+.stsync .stsync-result-warn .stsync-result-title i,
+.stsync .stsync-skipped-title i {
+    color: var(--stsync-accent);
+}
+
+.stsync .stsync-skipped {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-top: 6px;
+    border-top: 1px dashed var(--stsync-border);
+}
+
+.stsync .stsync-skipped-title {
+    font-weight: 600;
+}
+
+.stsync .stsync-skipped ul {
+    margin: 4px 0 0;
+    padding-left: 18px;
+    font-size: 0.85em;
+    max-height: 200px;
+    overflow: auto;
+    overflow-wrap: anywhere;
 }
 
 .stsync .stsync-result-danger {

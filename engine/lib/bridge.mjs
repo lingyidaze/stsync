@@ -87,6 +87,7 @@ export async function createBridge(cfg, state) {
             if (!res.headersSent) sendJson(res, 502, { ok: false, error: `TauriTavern 同步服务不可用：${error.message}` });
             else res.destroy(error);
         });
+        outbound.setTimeout(5 * 60_000, () => outbound.destroy(new Error('上游响应超时')));
         req.on('error', (error) => outbound.destroy(error));
         req.pipe(outbound);
     }

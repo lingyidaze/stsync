@@ -4,7 +4,7 @@ import { Readable } from 'node:stream';
 
 import { SyncError } from './errors.mjs';
 import { MAX_SIZE, CHUNKER_ID } from './chunker.mjs';
-import { CATEGORIES, resolveScope, validatePath } from './categories.mjs';
+import { CATEGORIES, isIgnored, resolveScope, sidecarOwner, validatePath } from './categories.mjs';
 import { digestOf } from './workspace.mjs';
 import { sha256b64url } from './state.mjs';
 import {
@@ -87,6 +87,7 @@ export function createSync({ state, workspace, identity }) {
         const seen = new Map();
         for (const e of manifest) {
             const p = checkPath(e?.path);
+            if (isIgnored(p)) continue;
             if (!scope.contains(p)) throw invalid(`路径不在所选类别内：${p}`);
             if (seen.has(p)) throw invalid(`清单中有重复路径：${p}`);
             const size = Number(e.size);
@@ -94,13 +95,39 @@ export function createSync({ state, workspace, identity }) {
             if (!Number.isSafeInteger(size) || size < 0 || !Number.isSafeInteger(mtime) || mtime < 0 || typeof e.digest !== 'string') {
                 throw invalid(`清单条目无效：${p}`);
             }
-            seen.set(p, { path: p, size, mtime, digest: e.digest });
+            const entry = { path: p, size, mtime, digest: e.digest };
+            if (e.base === null || typeof e.base === 'string') entry.base = e.base;
+            seen.set(p, entry);
         }
         return seen;
     }
 
     const boundaryOf = (scope, p) => scope.dirs.filter((d) => p.startsWith(d + '/')).sort((a, b) => b.length - a.length)[0] ?? null;
     const deletable = (scope, p) => boundaryOf(scope, p) !== null;
+    const keepsSidecar = (p, present) => {
+        const owner = sidecarOwner(p);
+        return owner !== null && present(owner);
+    };
+
+    function pushBlock(local, remote) {
+        if (local.base === undefined || !remote) return null;
+        if (local.base === null) {
+            if (local.mtime > remote.mtime) return null;
+            return local.mtime < remote.mtime ? 'remote-newer' : 'conflict';
+        }
+        if (remote.digest === local.base) return null;
+        return local.digest === local.base ? 'remote-newer' : 'conflict';
+    }
+
+    function pullBlock(local, remote) {
+        if (!local || local.base === undefined) return null;
+        if (local.base === null) {
+            if (remote.mtime > local.mtime) return null;
+            return remote.mtime < local.mtime ? 'local-newer' : 'conflict';
+        }
+        if (local.digest === local.base) return null;
+        return remote.digest === local.base ? 'local-newer' : 'conflict';
+    }
 
     const routes = {
         async info(req, res) {
@@ -124,6 +151,9 @@ export function createSync({ state, workspace, identity }) {
             const key = Buffer.from(String(body.key || ''), 'base64url');
             if (key.length !== 32) throw invalid('key 必须是 32 字节的 ed25519 公钥');
             const existing = await state.getDevice(id);
+            if (existing && existing.key !== key.toString('base64url')) {
+                throw new SyncError('Unauthorized', '这个设备 ID 已被另一台设备使用；如需重新接入，请先在服务器上用 stsync revoke 断开旧设备');
+            }
             await state.saveDevice({
                 id,
                 name: String(body.name || '未命名设备').slice(0, 64),
@@ -176,6 +206,7 @@ export function createSync({ state, workspace, identity }) {
             const body = parseJson(await readBody(req, JSON_LIMIT));
             const direction = body.direction;
             const mode = body.mode;
+            const force = body.force === true || mode === 'mirror';
             if (direction !== 'push' && direction !== 'pull') throw invalid('direction 必须是 push 或 pull');
             if (mode !== 'incremental' && mode !== 'mirror') throw invalid('mode 必须是 incremental 或 mirror');
             let scope;
@@ -189,9 +220,25 @@ export function createSync({ state, workspace, identity }) {
             const serverMap = new Map(server.map((e) => [e.path, e]));
             const plan = { id: crypto.randomUUID(), deviceId: device.id, direction, mode, scope, touchedAt: Date.now() };
 
+            const skipped = [];
+            const synced = [];
             if (direction === 'push') {
-                plan.upload = new Map([...client.values()].filter((e) => serverMap.get(e.path)?.digest !== e.digest).map((e) => [e.path, e]));
-                plan.delete = mode === 'mirror' ? server.filter((e) => !client.has(e.path) && deletable(scope, e.path)).map((e) => e.path) : [];
+                plan.upload = new Map();
+                for (const e of client.values()) {
+                    const remote = serverMap.get(e.path);
+                    if (remote?.digest !== e.digest) {
+                        const reason = force ? null : pushBlock(e, remote);
+                        if (reason) {
+                            skipped.push({ path: e.path, reason });
+                            continue;
+                        }
+                        plan.upload.set(e.path, e);
+                    }
+                    synced.push(e.path);
+                }
+                plan.delete = mode === 'mirror'
+                    ? server.filter((e) => !client.has(e.path) && deletable(scope, e.path) && !keepsSidecar(e.path, (q) => client.has(q))).map((e) => e.path)
+                    : [];
                 plan.assembled = new Set();
                 plan.usedStore = new Set();
                 plans.set(plan.id, plan);
@@ -201,6 +248,8 @@ export function createSync({ state, workspace, identity }) {
                     upload,
                     delete: plan.delete,
                     bytes: upload.reduce((n, e) => n + e.size, 0),
+                    skipped,
+                    synced,
                 });
                 return;
             }
@@ -209,19 +258,33 @@ export function createSync({ state, workspace, identity }) {
             plan.allowed = new Set();
             for (const e of server) {
                 const merge = scope.isMergeInput(e.path);
-                if (!merge && client.get(e.path)?.digest === e.digest) continue;
+                const local = client.get(e.path);
+                if (!merge && local?.digest === e.digest) {
+                    synced.push(e.path);
+                    continue;
+                }
+                const reason = merge || force ? null : pullBlock(local, e);
+                if (reason) {
+                    skipped.push({ path: e.path, reason });
+                    continue;
+                }
                 const entry = workspace.entries.get(e.path);
                 if (!entry) continue;
+                if (!merge) synced.push(e.path);
                 for (const [id] of entry.chunks) plan.allowed.add(id);
                 download.push({ ...e, chunks: entry.chunks, ...(merge ? { merge: true } : {}) });
             }
-            plan.delete = mode === 'mirror' ? [...client.keys()].filter((p) => !serverMap.has(p) && deletable(scope, p)) : [];
+            plan.delete = mode === 'mirror'
+                ? [...client.keys()].filter((p) => !serverMap.has(p) && deletable(scope, p) && !keepsSidecar(p, (q) => serverMap.has(q)))
+                : [];
             plans.set(plan.id, plan);
             sendJson(res, 200, {
                 id: plan.id,
                 download,
                 delete: plan.delete,
                 bytes: download.reduce((n, e) => n + e.size, 0),
+                skipped,
+                synced,
             });
         },
 

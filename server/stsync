@@ -18,6 +18,7 @@ STSync 服务端管理面板（root 执行）
   stsync firewall         重新应用防火墙放行与连接限速规则
   stsync restart          重启服务
   stsync logs [行数]      查看日志
+  stsync trash [批次]     查看回收站（与酒馆共用数据时，被覆盖或删除的旧文件保留 7 天）
   stsync uninstall        卸载 STSync（删除服务、程序和全部云端数据）
 EOF
 }
@@ -37,7 +38,15 @@ RATE_BURST=60
 if [ "${1:-}" = uninstall ]; then shift; exec sh /opt/stsync/uninstall.sh "$@"; fi
 [ -f "$CONFIG" ] || { echo "未找到 $CONFIG，请先运行 install.sh" >&2; exit 1; }
 
-engine() { (cd "$BASE" && runuser -u stsync -- $ENGINE "$@"); }
+config_value() { sed -n "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/p" "$CONFIG" | head -n1; }
+RUN_AS=$(config_value runAs)
+RUN_AS=${RUN_AS:-stsync:stsync}
+RUN_USER=${RUN_AS%%:*}
+RUN_GROUP=${RUN_AS#*:}
+WORKSPACE=$(config_value workspace)
+TRASH=$BASE/state/trash
+
+engine() { (cd "$BASE" && runuser -u "$RUN_USER" -- $ENGINE "$@"); }
 
 server_url() { engine config get url; }
 listen_addr() { engine config get listen; }
@@ -46,7 +55,7 @@ public_host() { server_url | sed 's#^https://##; s#/.*$##; s#:[0-9]*$##'; }
 
 set_config() {
     (cd "$BASE" && $ENGINE config set "$1" "$2" >/dev/null)
-    chown root:stsync "$CONFIG"
+    chown "root:$RUN_GROUP" "$CONFIG"
     chmod 0640 "$CONFIG"
 }
 
@@ -68,7 +77,7 @@ ensure_key() {
         (umask 077; new_token > "$KEYFILE.tmp")
         mv -f "$KEYFILE.tmp" "$KEYFILE"
     fi
-    chown root:stsync "$KEYFILE"
+    chown "root:$RUN_GROUP" "$KEYFILE"
     chmod 0640 "$KEYFILE"
 }
 
@@ -189,13 +198,19 @@ cmd_status() {
     state=$(systemctl is-active "$SERVICE" 2>/dev/null || true)
     tt_state=$(systemctl is-active "$TT_SERVICE" 2>/dev/null || true)
     devices=$(engine devices --json 2>/dev/null | grep -c '"kind"' || true)
-    size=$(du -sh "$BASE/workspace" 2>/dev/null | cut -f1)
+    if [ "$WORKSPACE" = "$BASE/workspace" ]; then
+        size=$(du -sh "$WORKSPACE" 2>/dev/null | cut -f1)
+        where=$WORKSPACE
+    else
+        size=$(du -sh "$WORKSPACE/data" 2>/dev/null | cut -f1)
+        where="$WORKSPACE，与该酒馆共用；运行身份 $RUN_AS"
+    fi
     echo "服务状态:   $state（TauriTavern 兼容：$tt_state）"
     echo "服务器地址: $(server_url)"
     echo "监听:       $(listen_addr)"
     echo "已接入设备: ${devices:-0} 台"
     echo "新设备接入: $(pairing_state)"
-    echo "云端数据:   ${size:-0}（$BASE/workspace）"
+    echo "云端数据:   ${size:-0}（$where）"
     echo "同步引擎:   STSync $(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' /opt/stsync/engine/package.json)（Node $(/opt/stsync/node/bin/node --version)）"
 }
 
@@ -254,6 +269,25 @@ cmd_host() {
     echo "注意：已连接的设备需要在插件里点「修改」，换成上面的新地址并重新保存（API Key 不变）。"
 }
 
+cmd_trash() {
+    if [ ! -d "$TRASH" ] || [ -z "$(ls -A "$TRASH" 2>/dev/null)" ]; then
+        echo "回收站是空的。"
+        return 0
+    fi
+    if [ -n "${1:-}" ]; then
+        [ -d "$TRASH/$1" ] || { echo "没有这个批次：$1" >&2; return 1; }
+        (cd "$TRASH/$1" && find . -type f | sed 's#^\./##' | sort)
+        echo
+        echo "恢复某个文件（示例）：cp -a \"$TRASH/$1/<上面的路径>\" \"$WORKSPACE/<上面的路径>\" && chown $RUN_AS \"$WORKSPACE/<上面的路径>\""
+        return 0
+    fi
+    echo "回收站批次（时间 · 文件数 · 大小）："
+    for d in $(ls -1 "$TRASH" | sort -r); do
+        printf '  %s · %s 个 · %s\n' "$d" "$(find "$TRASH/$d" -type f | wc -l)" "$(du -sh "$TRASH/$d" | cut -f1)"
+    done
+    echo "查看某批次的文件：stsync trash <批次>；批次保留 7 天后自动清理。"
+}
+
 cmd_logs() {
     journalctl -u "$SERVICE" -u "$TT_SERVICE" --no-pager -n "${1:-50}"
 }
@@ -280,6 +314,7 @@ panel() {
         echo "  7) 修改对外地址（IP/域名）"
         echo "  8) 重启服务"
         echo "  9) 查看日志"
+        echo "  t) 回收站"
         echo "  u) 卸载 STSync"
         echo "  0) 退出"
         echo "============================================="
@@ -319,6 +354,7 @@ panel() {
                 pause ;;
             8) restart_service || true; pause ;;
             9) cmd_logs 50 || true; pause ;;
+            t|T) cmd_trash || true; pause ;;
             u|U) exec sh /opt/stsync/uninstall.sh ;;
             0|q|Q) exit 0 ;;
             *) ;;
@@ -340,6 +376,7 @@ case "${1:-panel}" in
     firewall) apply_firewall "$(listen_port)" ;;
     restart) restart_service ;;
     logs)    cmd_logs "${2:-50}" ;;
+    trash)   cmd_trash "${2:-}" ;;
     -h|--help|help) usage ;;
     *) echo "未知命令：$1（stsync help 查看用法）" >&2; exit 2 ;;
 esac

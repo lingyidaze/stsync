@@ -189,10 +189,12 @@ function settingsHtml() {
         <div class="stsync-result" data-role="result" hidden>
           <div class="stsync-result-title" data-role="result-title"></div>
           <div class="stsync-result-stats" data-role="result-stats"></div>
+          <div class="stsync-skipped" data-role="result-skipped" hidden></div>
           <details data-role="result-warnings" hidden>
             <summary></summary>
             <ul></ul>
           </details>
+          <div class="stsync-inline-actions" data-role="result-actions"></div>
         </div>
       </div>
 
@@ -313,11 +315,41 @@ function render() {
     }
 }
 
-function showResult(tone, title, stats = [], warnings = []) {
+const SKIP_REASONS = {
+    'remote-newer': '云端较新',
+    'local-newer': '本机较新',
+    conflict: '两边都改过',
+};
+
+const RESULT_ACTIONS = {
+    'force-push': '<i class="fa-solid fa-cloud-arrow-up"></i><span>以本机为准强制上传</span>',
+    'force-pull': '<i class="fa-solid fa-cloud-arrow-down"></i><span>以云端为准强制下载</span>',
+    reload: '<i class="fa-solid fa-rotate-right"></i><span>刷新页面载入新数据</span>',
+};
+
+function renderSkipped(skipped, isPush) {
+    const box = $('[data-role="result-skipped"]');
+    box.hidden = skipped.length === 0;
+    if (!skipped.length) return;
+    const counts = {};
+    for (const s of skipped) counts[s.reason] = (counts[s.reason] || 0) + 1;
+    const summary = Object.entries(counts).map(([r, n]) => `${SKIP_REASONS[r] || r} ${n} 个`).join('，');
+    const hint = isPush
+        ? '这些文件没有上传，以免覆盖云端较新的内容。通常先「从云端下载」即可；确认要用本机版本覆盖时再强制上传。'
+        : '这些文件没有下载，以免覆盖本机较新的内容。通常先「上传到云端」即可；确认要用云端版本覆盖时再强制下载。';
+    box.innerHTML = `
+        <div class="stsync-skipped-title"><i class="fa-solid fa-triangle-exclamation"></i> 已跳过 ${skipped.length} 个文件（${escapeHtml(summary)}）</div>
+        <div class="stsync-muted">${escapeHtml(hint)}</div>
+        <details><summary>查看文件</summary><ul>${skipped.slice(0, 200)
+        .map((s) => `<li><span class="stsync-muted">[${escapeHtml(SKIP_REASONS[s.reason] || s.reason)}]</span> ${escapeHtml(s.path.replace(/^data\/default-user\//, ''))}</li>`)
+        .join('')}${skipped.length > 200 ? `<li>…还有 ${skipped.length - 200} 个</li>` : ''}</ul></details>`;
+}
+
+function showResult(tone, title, stats = [], warnings = [], { skipped = [], isPush = true, actions = [] } = {}) {
     const box = $('[data-role="result"]');
     box.hidden = false;
     box.className = `stsync-result stsync-result-${tone}`;
-    const icon = { ok: 'fa-circle-check', danger: 'fa-circle-xmark', info: 'fa-circle-info' }[tone] || 'fa-circle-info';
+    const icon = { ok: 'fa-circle-check', danger: 'fa-circle-xmark', info: 'fa-circle-info', warn: 'fa-triangle-exclamation' }[tone] || 'fa-circle-info';
     $('[data-role="result-title"]').innerHTML = `<i class="fa-solid ${icon}"></i> ${escapeHtml(title)}`;
     $('[data-role="result-stats"]').innerHTML = stats
         .map(([k, v]) => `<div><span class="stsync-muted">${escapeHtml(k)}</span><b>${escapeHtml(v)}</b></div>`).join('');
@@ -325,6 +357,9 @@ function showResult(tone, title, stats = [], warnings = []) {
     details.hidden = warnings.length === 0;
     details.querySelector('summary').textContent = `${warnings.length} 条提醒`;
     details.querySelector('ul').innerHTML = warnings.map((w) => `<li>${escapeHtml(w)}</li>`).join('');
+    renderSkipped(skipped, isPush);
+    $('[data-role="result-actions"]').innerHTML = actions
+        .map((a) => `<div class="menu_button menu_button_icon" data-action="${a}">${RESULT_ACTIONS[a]}</div>`).join('');
 }
 
 function hideResult() {
@@ -381,7 +416,7 @@ function createProgressView(verb) {
 
 async function refresh() {
     backend = await host.checkBackend().catch((error) => ({ state: 'error', title: '后端检测失败', detail: errorText(error) }));
-    hostReady = backend.state === 'ok' || backend.state === 'outdated';
+    hostReady = ['ok', 'outdated', 'unknown'].includes(backend.state);
     setupNeeded = !hostReady;
     if (setupNeeded) {
         servers = [];
@@ -431,6 +466,9 @@ async function onClick(event) {
         case 'copy': return doCopy(Number(target.dataset.index));
         case 'upload': return doSync(true);
         case 'download': return doSync(false);
+        case 'force-push': return doSync(true, true);
+        case 'force-pull': return doSync(false, true);
+        case 'reload': return window.location.reload();
     }
 }
 
@@ -494,11 +532,19 @@ async function doDisconnect() {
     await refresh();
 }
 
-async function doSync(isPush) {
+async function doSync(isPush, force = false) {
     const server = currentServer();
     if (!server || !hostReady) return;
 
-    if (settings.mode === api.MODES.MIRROR) {
+    if (force) {
+        const ok = await confirmDialog(
+            isPush ? '强制上传' : '强制下载',
+            isPush
+                ? '被跳过的文件将用本机版本覆盖云端版本（包括云端较新的内容）。确定继续？'
+                : '被跳过的文件将用云端版本覆盖本机版本（包括本机较新的内容）。被覆盖的本机文件会先备份，保留 7 天。确定继续？',
+        );
+        if (!ok) return;
+    } else if (settings.mode === api.MODES.MIRROR) {
         const ok = await confirmDialog(
             isPush ? '镜像上传' : '镜像下载',
             isPush
@@ -515,7 +561,7 @@ async function doSync(isPush) {
         const view = createProgressView(verb);
         let result = null;
         try {
-            result = await host.sync(direction, server.id, settings.mode, (p) => view.update(p));
+            result = await host.sync(direction, server.id, settings.mode, (p) => view.update(p), { force });
             view.close();
             if (result.status === 'failed') {
                 showResult('danger', `${verb}失败：${result.message || '未知错误'}`);
@@ -527,9 +573,16 @@ async function doSync(isPush) {
                 if (typeof s.sent === 'number') stats.push(['实际传输', formatBytes(s.sent)]);
                 if (typeof s.bytes === 'number' && s.bytes > 0) stats.push(['文件总量', formatBytes(s.bytes)]);
                 if (typeof s.deleted === 'number' && s.deleted > 0) stats.push(['删除文件', `${s.deleted} 个`]);
+                if (typeof s.backedUp === 'number' && s.backedUp > 0) stats.push(['已备份本机旧文件', `${s.backedUp} 个`]);
                 stats.push(['用时', formatDuration(Date.now() - started)]);
+                const skipped = Array.isArray(s.skipped) ? s.skipped : [];
                 const nothing = s.files === 0 && !s.deleted;
-                showResult('ok', nothing ? `已是最新，无需${verb}` : `${verb}完成`, stats, result.warnings || []);
+                const changed = !isPush && !nothing;
+                const actions = [];
+                if (skipped.length) actions.push(isPush ? 'force-push' : 'force-pull');
+                if (changed && skipped.length) actions.push('reload');
+                const title = nothing && !skipped.length ? `已是最新，无需${verb}` : `${verb}完成`;
+                showResult(skipped.length ? 'warn' : 'ok', title, stats, result.warnings || [], { skipped, isPush, actions });
             }
         } catch (error) {
             view.close();

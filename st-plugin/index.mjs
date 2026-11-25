@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
 
@@ -6,7 +7,7 @@ import { createTransport, pairDevice, serverInfo, SyncSession } from './lib/clie
 import { UserState } from './lib/state.mjs';
 import { runPush, runPull } from './lib/jobs.mjs';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const B64URL = /^[A-Za-z0-9_-]+$/;
 const MODES = new Set(['Incremental', 'Mirror']);
 
@@ -17,6 +18,17 @@ export const info = {
 };
 
 const jobs = new Map();
+
+function readHostInfo() {
+    try {
+        const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8'));
+        return { name: String(pkg.name || ''), version: String(pkg.version || '') };
+    } catch {
+        return { name: '', version: '' };
+    }
+}
+
+const hostInfo = readHostInfo();
 
 function userContext(request) {
     const handle = request.user?.profile?.handle || 'default-user';
@@ -99,6 +111,7 @@ export async function init(router) {
         return {
             ok: true,
             version: VERSION,
+            host: hostInfo,
             servers: (await ctx.state.servers()).map(publicServer),
             job: publicJob(jobs.get(ctx.handle)),
         };
@@ -148,6 +161,7 @@ export async function init(router) {
         const mode = request.body?.mode;
         if (direction !== 'push' && direction !== 'pull') throw new Error('direction 必须是 push 或 pull');
         if (!MODES.has(mode)) throw new Error('mode 必须是 Incremental 或 Mirror');
+        const force = request.body?.force === true;
 
         const running = jobs.get(ctx.handle);
         if (running?.status === 'running') throw new Error('已有同步正在进行，请等待完成');
@@ -184,7 +198,7 @@ export async function init(router) {
                 session = new SyncSession(createTransport(server.url, server.spki), identity);
                 const info = await serverInfo(session.transport);
                 await session.open();
-                const options = { info };
+                const options = { info, serverId: server.id, force };
                 const syncMode = mode === 'Mirror' ? 'mirror' : 'incremental';
                 job.summary = direction === 'push'
                     ? await runPush(session, ctx, syncMode, job, options)

@@ -22,11 +22,14 @@ else
     echo "✓ git、node 已安装，跳过"
 fi
 
-is_st() { [ -f "$1/server.js" ] && grep -q '"name": *"sillytavern"' "$1/package.json" 2>/dev/null; }
+is_st() { [ -f "$1/server.js" ] && grep -Eq '"name": *"(sillytavern|luker)"' "$1/package.json" 2>/dev/null; }
 
 ST=
 if [ $# -gt 0 ]; then
-    is_st "$1" || fail "$1 不是 SillyTavern 文件夹"
+    if ! is_st "$1"; then
+        [ -f "$1/server.js" ] && [ -f "$1/package.json" ] || fail "$1 不是 SillyTavern 文件夹"
+        echo "! $1 不是已验证过的 SillyTavern / Luker，将按 SillyTavern 的方式安装。同步前请先备份数据，并先用「增量」模式小范围试用。"
+    fi
     ST=$(cd "$1" && pwd)
 else
     for d in "$PWD" "$HOME/SillyTavern" "$HOME/sillytavern" "$HOME"/* "$HOME"/*/*; do

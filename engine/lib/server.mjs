@@ -17,7 +17,7 @@ export function splitListen(listen) {
 export async function createServer(state, config) {
     const identity = await state.identity();
     const tlsMaterial = await state.tls();
-    const workspace = new Workspace(config.workspace, state.stateDir);
+    const workspace = new Workspace(config.workspace, state.stateDir, { trash: config.trash === true });
     await workspace.load();
     const sync = createSync({ state, workspace, identity });
 
@@ -36,9 +36,10 @@ export async function createServer(state, config) {
         cert: tlsMaterial.cert,
         minVersion: 'TLSv1.3',
         ALPNProtocols: ['http/1.1'],
-        requestTimeout: 0,
+        requestTimeout: 30 * 60_000,
         headersTimeout: 60_000,
         keepAliveTimeout: 30_000,
+        connectionsCheckingInterval: 30_000,
     }, async (req, res) => {
         const started = Date.now();
         let url;
@@ -67,6 +68,9 @@ export async function createServer(state, config) {
             if (log) res.once('finish', () => console.log(`[stsync] ${req.method} ${url?.pathname ?? '?'} ${res.statusCode} ${Date.now() - started}ms`));
         }
     });
+
+    server.setTimeout(5 * 60_000, (socket) => socket.destroy());
+    server.maxConnections = 512;
 
     const [host, port] = splitListen(config.listen);
     return {

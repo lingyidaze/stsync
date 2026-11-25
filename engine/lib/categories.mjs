@@ -16,6 +16,7 @@ export const CATEGORIES = [
     { id: 'appearance', label: '外观', dirs: user('themes', 'backgrounds', 'movingUI') },
     { id: 'media', label: '媒体与用户文件', dirs: user('assets', 'user/images', 'user/files', 'user/workflows') },
     { id: 'extensions', label: '扩展', dirs: [...user('extensions'), 'public/scripts/extensions/third-party'] },
+    { id: 'luker', label: 'Luker 专属', dirs: user('card-apps', 'skills') },
     { id: 'vectors', label: '向量库', dirs: user('vectors') },
     { id: 'backups', label: '备份', dirs: user('backups') },
     {
@@ -29,10 +30,21 @@ export const CATEGORY_IDS = CATEGORIES.map((c) => c.id);
 const BY_ID = new Map(CATEGORIES.map((c) => [c.id, c]));
 
 const TEMP_SUFFIXES = ['.stsync.tmp', '.ttsync.tmp'];
+const IGNORED_DIRS = new Set(['.git', 'node_modules']);
+const SELF_DIRS = [`${USER}/extensions/stsync`, 'public/scripts/extensions/third-party/stsync'];
 
 export function isIgnored(p) {
     const name = p.slice(p.lastIndexOf('/') + 1);
-    return TEMP_SUFFIXES.some((s) => name.endsWith(s));
+    if (TEMP_SUFFIXES.some((s) => name.endsWith(s))) return true;
+    if (p.split('/').some((segment) => IGNORED_DIRS.has(segment))) return true;
+    return SELF_DIRS.some((d) => p === d || p.startsWith(`${d}/`));
+}
+
+const SIDECAR = /^(.*)\.luker-state\.[^/]+\.json$/;
+
+export function sidecarOwner(p) {
+    const match = SIDECAR.exec(p);
+    return match ? `${match[1]}.jsonl` : null;
 }
 
 const BAD_CHARS = /[\u0000-\u001f\\]/;
@@ -52,9 +64,9 @@ export function resolveScope(ids) {
     const selected = [];
     for (const id of ids) {
         const category = BY_ID.get(id);
-        if (!category) throw new TypeError(`未知数据类别：${id}`);
-        if (!selected.includes(category)) selected.push(category);
+        if (category && !selected.includes(category)) selected.push(category);
     }
+    if (selected.length === 0) throw new TypeError(`未知数据类别：${ids.join(', ')}`);
     const dirs = selected.flatMap((c) => c.dirs || []);
     const files = new Set(selected.flatMap((c) => c.files || []));
     const mergeInputs = new Set(selected.flatMap((c) => c.mergeInputs || []));

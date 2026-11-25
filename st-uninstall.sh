@@ -13,7 +13,7 @@ for a in "$@"; do
     esac
 done
 
-is_st() { [ -f "$1/server.js" ] && grep -q '"name": *"sillytavern"' "$1/package.json" 2>/dev/null; }
+is_st() { [ -f "$1/server.js" ] && grep -Eq '"name": *"(sillytavern|luker)"' "$1/package.json" 2>/dev/null; }
 
 ST=
 if [ -n "$ARG" ]; then

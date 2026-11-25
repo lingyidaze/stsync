@@ -10,7 +10,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 function isSillyTavernRoot(dir) {
     try {
         const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
-        return pkg.name === 'sillytavern' && fs.existsSync(path.join(dir, 'server.js'));
+        return ['sillytavern', 'luker'].includes(pkg.name) && fs.existsSync(path.join(dir, 'server.js'));
     } catch {
         return false;
     }
@@ -40,7 +40,13 @@ function childDirs(dir) {
 function findRoot() {
     if (process.argv[2]) {
         const dir = path.resolve(process.argv[2]);
-        return isSillyTavernRoot(dir) ? dir : null;
+        if (isSillyTavernRoot(dir)) return dir;
+        if (fs.existsSync(path.join(dir, 'server.js')) && fs.existsSync(path.join(dir, 'package.json'))) {
+            console.warn('! 这个目录不是已验证过的 SillyTavern / Luker，将按 SillyTavern 的方式安装。');
+            console.warn('  同步前请先备份数据，并先用「增量」模式小范围试用。');
+            return dir;
+        }
+        return null;
     }
     const home = os.homedir();
     const levelOne = childDirs(home);

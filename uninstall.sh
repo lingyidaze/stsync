@@ -30,6 +30,8 @@ done_() { echo "  ✓ $*"; }
 
 UNITS="stsync.service stsync-tauritavern.service stsync-autolock.timer stsync-autolock.service"
 PORT=$(sed -n 's/.*"listen": *"[^"]*:\([0-9]*\)".*/\1/p' "$BASE/config.json" 2>/dev/null | head -n1)
+SHARED=$(sed -n 's/.*"workspace": *"\([^"]*\)".*/\1/p' "$BASE/config.json" 2>/dev/null | head -n1)
+[ "$SHARED" != "$BASE/workspace" ] || SHARED=
 
 FOUND=
 for u in $UNITS; do [ -f "/etc/systemd/system/$u" ] && FOUND=1; done
@@ -42,7 +44,12 @@ echo "  · 服务 stsync / stsync-tauritavern"
 echo "  · 程序 $OPT 与管理命令 /usr/local/sbin/stsync"
 echo "  · 云端数据、API Key、服务器证书与已接入设备 $BASE$( [ -d "$BASE/workspace" ] && printf '（%s）' "$(du -sh "$BASE/workspace" 2>/dev/null | cut -f1)" )"
 echo "  · 系统用户 stsync"
-echo "已连接的酒馆设备之后将无法同步，云端数据无法恢复。"
+if [ -n "$SHARED" ]; then
+    echo "  （云端数据与 $SHARED 共用，这部分数据会保留，不会删除；STSync 的回收站会被删除）"
+    echo "已连接的酒馆设备之后将无法同步。"
+else
+    echo "已连接的酒馆设备之后将无法同步，云端数据无法恢复。"
+fi
 if [ "$YES" = 0 ]; then
     [ -r /dev/tty ] || fail "无法交互确认，请加 --yes 参数"
     printf '确定卸载？输入 yes 继续：'
@@ -83,5 +90,6 @@ if id stsync >/dev/null 2>&1; then
 fi
 
 echo
+[ -z "$SHARED" ] || echo "共用的酒馆数据仍在 $SHARED，未做任何改动。"
 echo "STSync 已卸载。云服务器控制台「安全组」里为它放行的端口${PORT:+ $PORT} 可以一并关闭。"
 echo "酒馆端：在扩展页删除 STSync 扩展，或运行 st-uninstall.sh。"

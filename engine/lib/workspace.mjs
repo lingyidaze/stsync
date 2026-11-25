@@ -11,6 +11,12 @@ import { chunkFile, chunkId, CHUNKER_ID } from './chunker.mjs';
 import { isIgnored } from './categories.mjs';
 
 const STORE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const TRASH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function batchName(date = new Date()) {
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}`;
+}
 
 export const digestOf = (size, ids) => crypto.createHash('sha256').update(`${size}\n${ids.join('\n')}`).digest('base64url');
 
@@ -86,8 +92,9 @@ export class ChunkStore {
 }
 
 export class Workspace {
-    constructor(root, stateDir) {
+    constructor(root, stateDir, { trash = false } = {}) {
         this.root = path.resolve(root);
+        this.trashDir = trash ? path.join(stateDir, 'trash') : null;
         this.indexFile = path.join(stateDir, 'index.json');
         this.store = new ChunkStore(path.join(stateDir, 'chunks'));
         this.entries = new Map();
@@ -101,9 +108,45 @@ export class Workspace {
             if (data?.chunker === CHUNKER_ID) for (const [p, e] of Object.entries(data.entries || {})) this.setEntry(p, e, false);
         } catch {
         }
-        const timer = setInterval(() => this.store.gc().catch(() => {}), 6 * 60 * 60 * 1000);
+        const gc = () => {
+            this.store.gc().catch(() => {});
+            this.gcTrash().catch(() => {});
+        };
+        const timer = setInterval(gc, 6 * 60 * 60 * 1000);
         timer.unref();
-        this.store.gc().catch(() => {});
+        gc();
+    }
+
+    async gcTrash() {
+        if (!this.trashDir) return;
+        const cutoff = Date.now() - TRASH_TTL_MS;
+        for (const name of await fsp.readdir(this.trashDir).catch(() => [])) {
+            const dir = path.join(this.trashDir, name);
+            const st = await fsp.stat(dir).catch(() => null);
+            if (st && st.mtimeMs < cutoff) await fsp.rm(dir, { recursive: true, force: true });
+        }
+    }
+
+    async trashTarget(p) {
+        const batch = path.join(this.trashDir, batchName());
+        let target = path.join(batch, ...p.split('/'));
+        for (let i = 1; fs.existsSync(target); i += 1) target = path.join(batch, ...`${p}.${i}`.split('/'));
+        await fsp.mkdir(path.dirname(target), { recursive: true });
+        const now = new Date();
+        await fsp.utimes(batch, now, now).catch(() => {});
+        return target;
+    }
+
+    async keepOld(p, full, move) {
+        if (!this.trashDir || !fs.existsSync(full)) return;
+        const target = await this.trashTarget(p);
+        try {
+            if (move) await fsp.rename(full, target);
+            else await fsp.link(full, target);
+        } catch {
+            await fsp.copyFile(full, target);
+            if (move) await fsp.rm(full, { force: true });
+        }
     }
 
     full(p) {
@@ -125,7 +168,15 @@ export class Workspace {
     forget(p) {
         const old = this.entries.get(p);
         if (!old) return;
-        for (const [id] of old.chunks) if (this.locations.get(id)?.path === p) this.locations.delete(id);
+        for (const [id] of old.chunks) this.dropLocation(id, p);
+    }
+
+    dropLocation(id, p) {
+        const list = this.locations.get(id);
+        if (!list) return;
+        const rest = list.filter((loc) => loc.path !== p);
+        if (rest.length) this.locations.set(id, rest);
+        else this.locations.delete(id);
     }
 
     setEntry(p, entry, save = true) {
@@ -133,7 +184,9 @@ export class Workspace {
         this.entries.set(p, entry);
         let offset = 0;
         for (const [id, length] of entry.chunks) {
-            if (!this.locations.has(id)) this.locations.set(id, { path: p, offset, length });
+            const list = this.locations.get(id);
+            if (!list) this.locations.set(id, [{ path: p, offset, length }]);
+            else if (!list.some((loc) => loc.path === p)) list.push({ path: p, offset, length });
             offset += length;
         }
         if (save) this.scheduleSave();
@@ -189,15 +242,15 @@ export class Workspace {
     async source(id) {
         const size = await this.store.size(id);
         if (size !== null) return { kind: 'store', length: size };
-        const loc = this.locations.get(id);
-        if (!loc) return null;
-        const entry = this.entries.get(loc.path);
-        const st = await fsp.stat(this.full(loc.path)).catch(() => null);
-        if (!entry || !st || st.size !== entry.size || Math.floor(st.mtimeMs) !== entry.mtime) {
-            this.locations.delete(id);
-            return null;
+        for (const loc of [...(this.locations.get(id) || [])]) {
+            const entry = this.entries.get(loc.path);
+            const st = await fsp.stat(this.full(loc.path)).catch(() => null);
+            if (entry && st && st.size === entry.size && Math.floor(st.mtimeMs) === entry.mtime) {
+                return { kind: 'file', full: this.full(loc.path), offset: loc.offset, length: loc.length };
+            }
+            this.dropLocation(id, loc.path);
         }
-        return { kind: 'file', full: this.full(loc.path), offset: loc.offset, length: loc.length };
+        return null;
     }
 
     async readChunk(id, src) {
@@ -219,6 +272,7 @@ export class Workspace {
         const tmp = `${full}.${crypto.randomUUID().slice(0, 8)}.stsync.tmp`;
         try {
             await pipeline(source, exactSize(size, p), fs.createWriteStream(tmp));
+            await this.keepOld(p, full, false);
             await fsp.rename(tmp, full);
             const t = new Date(mtime);
             await fsp.utimes(full, t, t);
@@ -231,6 +285,7 @@ export class Workspace {
 
     async deleteFile(p, boundaryRel) {
         const full = this.full(p);
+        await this.keepOld(p, full, true);
         await fsp.rm(full, { force: true });
         this.dropEntry(p);
         const boundary = boundaryRel ? this.full(boundaryRel) : path.dirname(full);

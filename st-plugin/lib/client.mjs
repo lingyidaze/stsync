@@ -4,7 +4,7 @@ import tls from 'node:tls';
 import net from 'node:net';
 import crypto from 'node:crypto';
 
-const REQUEST_TIMEOUT_MS = 120_000;
+const REQUEST_TIMEOUT_MS = 5 * 60_000;
 const SESSION_RENEW_MARGIN_MS = 60_000;
 
 export const sha256b64url = (data) => crypto.createHash('sha256').update(data).digest('base64url');

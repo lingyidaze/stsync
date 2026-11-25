@@ -27,6 +27,74 @@ const SECTION_NAMES = {
     'data/default-user/settings/persona-state.json': 'persona_state',
 };
 const HAS_ZSTD = typeof zlib.createZstdCompress === 'function';
+const TRASH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+class SyncBase {
+    constructor(ctx, serverId) {
+        this.file = serverId ? path.join(ctx.stateRoot, 'base', `${serverId.replace(/[^A-Za-z0-9_-]/g, '_')}.json`) : null;
+        this.map = new Map();
+    }
+
+    async load() {
+        if (!this.file) return this;
+        try {
+            this.map = new Map(Object.entries(JSON.parse(await fsp.readFile(this.file, 'utf8'))));
+        } catch {
+        }
+        return this;
+    }
+
+    get(p) {
+        return this.file ? (this.map.get(p) ?? null) : undefined;
+    }
+
+    async save() {
+        if (!this.file) return;
+        await fsp.mkdir(path.dirname(this.file), { recursive: true });
+        const tmp = `${this.file}.${process.pid}.stsync.tmp`;
+        await fsp.writeFile(tmp, JSON.stringify(Object.fromEntries(this.map)));
+        await fsp.rename(tmp, this.file);
+    }
+}
+
+class LocalTrash {
+    constructor(ctx) {
+        this.root = path.join(ctx.stateRoot, 'trash');
+        const pad = (n) => String(n).padStart(2, '0');
+        const d = new Date();
+        this.batch = path.join(this.root, `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`);
+        this.count = 0;
+    }
+
+    async gc() {
+        const cutoff = Date.now() - TRASH_TTL_MS;
+        for (const name of await fsp.readdir(this.root).catch(() => [])) {
+            const dir = path.join(this.root, name);
+            const st = await fsp.stat(dir).catch(() => null);
+            if (st && st.mtimeMs < cutoff) await fsp.rm(dir, { recursive: true, force: true });
+        }
+    }
+
+    async keep(p, full) {
+        if (!fs.existsSync(full)) return;
+        const target = path.join(this.batch, ...p.split('/'));
+        await fsp.mkdir(path.dirname(target), { recursive: true });
+        await fsp.copyFile(full, target);
+        this.count += 1;
+    }
+}
+
+function categoriesFor(info, categories) {
+    if (categories) return categories;
+    const offered = Array.isArray(info?.categories) ? new Set(info.categories.map((c) => c?.id)) : null;
+    return offered ? CATEGORY_IDS.filter((id) => offered.has(id)) : CATEGORY_IDS;
+}
+
+function skippedOf(plan) {
+    return Array.isArray(plan.skipped)
+        ? plan.skipped.filter((s) => typeof s?.path === 'string').map((s) => ({ path: s.path, reason: String(s.reason || 'conflict') }))
+        : [];
+}
 
 const planUrl = (id, action) => `/api/v1/plans/${encodeURIComponent(id)}${action ? `/${action}` : ''}`;
 
@@ -113,12 +181,18 @@ function localSources(local) {
     return sources;
 }
 
-async function prepare(ctx, categories) {
-    const scope = resolveScope(categories || CATEGORY_IDS);
+async function prepare(ctx, categories, serverId) {
+    const scope = resolveScope(categories);
     const index = await new LocalIndex(ctx).load();
+    const base = await new SyncBase(ctx, serverId).load();
     const local = await scanLocal(ctx, scope, index);
-    const manifest = [...local.values()].map(({ path: p, size, mtime, digest }) => ({ path: p, size, mtime, digest }));
-    return { scope, index, local, manifest };
+    const manifest = [...local.values()].map(({ path: p, size, mtime, digest }) => {
+        const entry = { path: p, size, mtime, digest };
+        const b = base.get(p);
+        if (b !== undefined) entry.base = b;
+        return entry;
+    });
+    return { scope, index, base, local, manifest };
 }
 
 async function askMissing(session, planId, ids) {
@@ -156,13 +230,14 @@ async function uploadChunks(session, planId, chunks, encoding, job) {
     }
 }
 
-export async function runPush(session, ctx, mode, job, { info, categories } = {}) {
+export async function runPush(session, ctx, mode, job, { info, categories, serverId, force = false } = {}) {
     job.phase = 'scanning';
-    const { local, manifest } = await prepare(ctx, categories);
+    categories = categoriesFor(info, categories);
+    const { base, local, manifest } = await prepare(ctx, categories, serverId);
 
     job.phase = 'planning';
     const plan = await session.json('POST', '/api/v1/sync/plan', {
-        direction: 'push', mode, categories: categories || CATEGORY_IDS, manifest,
+        direction: 'push', mode, force, categories, manifest,
     }, '创建上传计划失败');
     const upload = plan.upload || [];
     job.filesTotal = upload.length;
@@ -206,7 +281,15 @@ export async function runPush(session, ctx, mode, job, { info, categories } = {}
         job.phase = 'committing';
         const result = await session.json('POST', planUrl(plan.id, 'commit'), undefined, '提交上传失败');
         committed = true;
-        return { files: upload.length, bytes: job.bytesTotal, sent: job.bytesSent, deleted: result.deleted ?? 0 };
+        if (Array.isArray(plan.synced)) {
+            for (const p of plan.synced) {
+                const item = local.get(p);
+                if (item) base.map.set(p, item.digest);
+            }
+            for (const p of plan.delete || []) base.map.delete(p);
+            await base.save();
+        }
+        return { files: upload.length, bytes: job.bytesTotal, sent: job.bytesSent, deleted: result.deleted ?? 0, skipped: skippedOf(plan) };
     } finally {
         if (!committed) await session.raw('DELETE', planUrl(plan.id)).catch(() => {});
     }
@@ -248,13 +331,16 @@ function needsSectionMerge(core, sections) {
     return Object.entries(sections).some(([name, value]) => value && Object.keys(fromCore[name] || {}).length === 0);
 }
 
-export async function runPull(session, ctx, mode, job, { info, categories } = {}) {
+export async function runPull(session, ctx, mode, job, { info, categories, serverId, force = false } = {}) {
     job.phase = 'scanning';
-    const { index, local, manifest } = await prepare(ctx, categories);
+    categories = categoriesFor(info, categories);
+    const { index, base, local, manifest } = await prepare(ctx, categories, serverId);
+    const trash = new LocalTrash(ctx);
+    await trash.gc();
 
     job.phase = 'planning';
     const plan = await session.json('POST', '/api/v1/sync/plan', {
-        direction: 'pull', mode, categories: categories || CATEGORY_IDS, manifest,
+        direction: 'pull', mode, force, categories, manifest,
     }, '创建下载计划失败');
     const download = plan.download || [];
     const deletes = plan.delete || [];
@@ -342,6 +428,7 @@ export async function runPull(session, ctx, mode, job, { info, categories } = {}
                 continue;
             }
             const { full } = resolveLocal(ctx, entry.path);
+            await trash.keep(entry.path, full);
             await publishFile(tmp, full, entry.mtime);
             index.record(entry.path, { size: entry.size, mtime: entry.mtime, digest: entry.digest, chunks: entry.chunks });
         }
@@ -354,6 +441,7 @@ export async function runPull(session, ctx, mode, job, { info, categories } = {}
             } catch {
                 job.warnings.push('云端 settings.json 不是有效的 JSON，已跳过');
             }
+            if (core) await trash.keep(SETTINGS_PATH, full);
             if (core && needsSectionMerge(core, sections)) {
                 const merged = applyDownloadedSections((await readLocalSettings(ctx)).settings, { core, ...sections });
                 const mergedTmp = `${tmp}.merged`;
@@ -368,8 +456,9 @@ export async function runPull(session, ctx, mode, job, { info, categories } = {}
 
         let deleted = 0;
         for (const p of deletes) {
-            const { full, base } = resolveLocal(ctx, p);
-            await removeFileAndPrune(full, base);
+            const { full, base: root } = resolveLocal(ctx, p);
+            await trash.keep(p, full);
+            await removeFileAndPrune(full, root);
             index.forget(p);
             deleted += 1;
         }
@@ -377,11 +466,22 @@ export async function runPull(session, ctx, mode, job, { info, categories } = {}
 
         await session.json('POST', planUrl(plan.id, 'commit'), undefined, '完成下载失败');
         await store.clear();
+        if (Array.isArray(plan.synced)) {
+            const remote = new Map(download.map((e) => [e.path, e.digest]));
+            for (const p of plan.synced) {
+                const digest = remote.get(p) ?? local.get(p)?.digest;
+                if (digest) base.map.set(p, digest);
+            }
+            for (const p of deletes) base.map.delete(p);
+            await base.save();
+        }
         return {
             files: download.filter((e) => !e.merge).length,
             bytes: job.bytesTotal,
             sent: job.bytesSent,
             deleted,
+            skipped: skippedOf(plan),
+            backedUp: trash.count,
         };
     } finally {
         await fsp.rm(staging, { recursive: true, force: true });
