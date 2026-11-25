@@ -107,7 +107,7 @@ function settingsHtml() {
       <span class="stsync-badge" data-role="badge"></span>
       <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
     </div>
-    <div class="inline-drawer-content stsync-body">
+    <div class="inline-drawer-content"><div class="stsync-body">
 
       <div class="stsync-card stsync-backend" data-role="backend">
         <div class="stsync-backend-head">
@@ -198,7 +198,7 @@ function settingsHtml() {
         </div>
       </div>
 
-    </div>
+    </div></div>
   </div>
 </div>`;
 }
