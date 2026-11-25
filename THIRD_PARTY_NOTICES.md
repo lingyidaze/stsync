@@ -1,6 +1,6 @@
 # 第三方声明（Third-Party Notices）
 
-STSync 依赖或参考了下列开源项目。本文件按各项目许可证的要求附上其版权声明与许可文本。
+STSync 依赖或参考了下列开源项目。本文件按各项目许可证的要求附上其版权声明与许可文本。STSync 为第三方项目，与下列项目的官方团队无隶属关系。
 
 ---
 
@@ -59,3 +59,11 @@ STSync 以 AGPL-3.0 发布，许可全文见仓库根目录的 [LICENSE](LICENSE
 - 项目地址：https://github.com/SillyTavern/SillyTavern
 - 许可证：GNU Affero General Public License v3.0（AGPL-3.0）
 - 与 STSync 的关系：STSync 是 SillyTavern 的扩展与服务端插件，基于 SillyTavern 的扩展和插件接口开发，不包含 SillyTavern 的源码。
+
+---
+
+## Luker
+
+- 项目地址：https://github.com/funnycups/Luker
+- 许可证：GNU Affero General Public License v3.0（AGPL-3.0）
+- 与 STSync 的关系：STSync 的适配对象之一（识别 Luker 安装目录、同步其专属数据目录 card-apps 与 skills、保护其聊天附属文件），本仓库不包含 Luker 的代码。

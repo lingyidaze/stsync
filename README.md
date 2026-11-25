@@ -2,6 +2,8 @@
 
 STSync 是适配 SillyTavern、Luker 与 TauriTavern 的云端同步系统，用于将全部数据上传至你的服务器或从服务器下载，支持增量与镜像两种同步模式。多端可连接同一台服务器并共用同一份云端数据。
 
+> 本项目为第三方项目，与 SillyTavern、Luker、TauriTavern、TT-Sync 的官方团队无隶属关系。
+
 ## 特性
 
 - **支持的酒馆**：SillyTavern、Luker（SillyTavern 分支，自动识别，另有「Luker 专属」数据类别）、TauriTavern（使用其内置同步方式）；其他基于 SillyTavern 的分支可手动指定目录安装，面板会提示「未识别的酒馆」。
@@ -362,7 +364,7 @@ curl -fsSL https://raw.githubusercontent.com/lingyidaze/stsync/main/install.sh |
 - **[SillyTavern](https://github.com/SillyTavern/SillyTavern)**（AGPL-3.0 许可证）：STSync 的宿主平台，前端扩展与服务端插件基于其扩展与插件接口开发。
 - **[Luker](https://github.com/funnycups/Luker)**（AGPL-3.0 许可证）：SillyTavern 的分支，STSync 的适配对象之一；本仓库不包含 Luker 的代码。
 
-各上游项目的版权声明与完整许可文本见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+STSync 为第三方项目，与上述项目的官方团队无隶属关系，所列名称仅用于说明适配与兼容对象。各上游项目的版权声明与完整许可文本见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 许可证
 
