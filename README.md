@@ -1,15 +1,16 @@
 # STSync
 
-STSync 是 SillyTavern 的云端同步系统，用于将全部数据上传至你的服务器或从服务器下载，支持增量与镜像两种同步模式。STSync 同时兼容 TauriTavern，两边可连接同一台服务器并共用同一份云端数据。
+STSync 是适配 SillyTavern、Luker 与 TauriTavern 的云端同步系统，用于将全部数据上传至你的服务器或从服务器下载，支持增量与镜像两种同步模式。多端可连接同一台服务器并共用同一份云端数据。
 
 ## 特性
 
-- **完整数据同步**：覆盖角色卡、聊天记录、群组、用户角色、世界书、预设与提示词模板、快速回复、外观、媒体与用户文件、扩展、向量库、备份（默认不同步）、设置与 API 密钥、Luker 专属（card-apps 卡片应用、skills 技能）。同时支持 SillyTavern 的分支 Luker。
+- **支持的酒馆**：SillyTavern、Luker（SillyTavern 分支，自动识别，另有「Luker 专属」数据类别）、TauriTavern（使用其内置同步方式）；其他基于 SillyTavern 的分支可手动指定目录安装，面板会提示「未识别的酒馆」。
+- **完整数据同步**：覆盖角色卡、聊天记录、群组、用户角色、世界书、预设与提示词模板、快速回复、外观、媒体与用户文件、扩展、向量库、备份（默认不同步）、设置与 API 密钥、Luker 专属（card-apps 卡片应用、skills 技能）。
 - **内容定义分块去重**：采用 FastCDC 算法（块大小 16–256 KB，平均约 64 KB），仅传输接收端缺失的数据块。
 - **断点续传与传输压缩**：已上传或已下载的数据块保留在本地/服务端缓存中，中断后重试自动跳过；块数据按批次打包并以 zstd 压缩（不支持时回退至 brotli）。
 - **低门槛接入**：通过服务器地址与 `sts1.<令牌>.<证书指纹>` 格式的 API Key 即可配对设备，支持多设备复用及新设备接入开关。
 - **传输与系统安全**：TLS 1.3 自签证书配合 SPKI 证书固定、ed25519 设备会话签名、ufw 按来源 IP 限速（每分钟 30 次、突发 60 次），服务端运行于非特权用户 `stsync` 与 systemd 沙箱中。
-- **兼容 TauriTavern**：SillyTavern 使用 STSync 同步协议（`/api/v1`），TauriTavern 使用其内置客户端通过 `/v2` 接口连接同一服务器；服务端运行官方 `tt-sync` 程序并共用同一 SillyTavern 目录结构的工作区。
+- **兼容 TauriTavern**：SillyTavern 与 Luker 使用 STSync 同步协议（`/api/v1`），TauriTavern 使用其内置客户端通过 `/v2` 接口连接同一服务器；服务端运行官方 `tt-sync` 程序并共用同一 SillyTavern 目录结构的工作区。
 
 ## 快速开始
 
@@ -209,7 +210,7 @@ curl -fsSL https://raw.githubusercontent.com/lingyidaze/stsync/main/uninstall.sh
 | — | `stsync status` | 查看服务状态、对外地址、监听端口、已接入设备数与云端数据大小（共用模式下显示共用的酒馆目录与运行身份） |
 | 1 | `stsync key` | 显示服务器地址与 API Key |
 | 2 | `stsync rotate` | 更换 API Key，旧 Key 立即失效（已连接设备不受影响） |
-| 3 | `stsync devices` | 列出已接入的设备（含 SillyTavern 与 TauriTavern 设备） |
+| 3 | `stsync devices` | 列出已接入的设备（含 SillyTavern / Luker 与 TauriTavern 设备） |
 | 4 | `stsync revoke <设备>` | 按设备 ID 或名称断开指定设备 |
 | 5 | `stsync lock` / `stsync unlock [分钟]` | 关闭或开启新设备接入；指定分钟数后到时自动关闭 |
 | 6 | `stsync port <端口>` | 修改对外端口，更新 ufw 放行与限速规则并重启服务 |
@@ -312,8 +313,8 @@ curl -fsSL https://raw.githubusercontent.com/lingyidaze/stsync/main/install.sh |
 
 | 路径 | 作用 |
 |---|---|
-| 根目录（`index.js`、`api.js`、`host-st.js`、`host-tauri.js`、`style.css`、`manifest.json`） | 前端扩展，同时适配 SillyTavern 与 TauriTavern |
-| `st-plugin/` | SillyTavern 服务端插件，负责本地文件扫描、分块、上传与下载；`install.mjs` 为一键安装脚本 |
+| 根目录（`index.js`、`api.js`、`host-st.js`、`host-tauri.js`、`style.css`、`manifest.json`） | 前端扩展，同时适配 SillyTavern、Luker 与 TauriTavern |
+| `st-plugin/` | SillyTavern / Luker 服务端插件，负责本地文件扫描、分块、上传与下载；`install.mjs` 为一键安装脚本 |
 | `engine/` | STSync 同步引擎（服务端主程序） |
 | `install.sh` | 服务端安装 / 升级脚本（一个文件完成全部部署，含 systemd 服务配置） |
 | `st-install.sh` | SillyTavern 端一行安装 / 更新脚本（Termux / Linux / macOS） |
@@ -359,6 +360,7 @@ curl -fsSL https://raw.githubusercontent.com/lingyidaze/stsync/main/install.sh |
 - **[TauriTavern](https://github.com/Darkatse/TauriTavern)**（作者 Darkatse，AGPL-3.0 许可证）：TauriTavern 端调用其内置同步接口；`st-plugin/lib/settings-sections.mjs` 中的设置分区规则移植自其源码 `src-tauri/crates/tt-adapter-storage-core/src/repositories/file_settings_repository/fields.rs`。
 - **[TT-Sync](https://github.com/Darkatse/TT-Sync)**（作者 C.J. Wu，MIT 许可证）：TauriTavern 兼容组件，由 `install.sh` 从官方发行页下载并校验 SHA256 后原样运行，不做修改；本仓库不包含 TT-Sync 的代码。
 - **[SillyTavern](https://github.com/SillyTavern/SillyTavern)**（AGPL-3.0 许可证）：STSync 的宿主平台，前端扩展与服务端插件基于其扩展与插件接口开发。
+- **[Luker](https://github.com/funnycups/Luker)**（AGPL-3.0 许可证）：SillyTavern 的分支，STSync 的适配对象之一；本仓库不包含 Luker 的代码。
 
 各上游项目的版权声明与完整许可文本见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 

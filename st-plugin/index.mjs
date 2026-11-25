@@ -14,7 +14,7 @@ const MODES = new Set(['Incremental', 'Mirror']);
 export const info = {
     id: 'stsync',
     name: 'STSync',
-    description: 'SillyTavern 云端同步：把数据上传/下载到 STSync 服务器（可与 TauriTavern 共用）',
+    description: 'SillyTavern / Luker 云端同步：把数据上传/下载到 STSync 服务器（可与 TauriTavern 共用）',
 };
 
 const jobs = new Map();
